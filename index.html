@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Shape Challenge - Webcam & VR Hand Tracking</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+        body { width: 100vw; height: 100vh; overflow: hidden; background: #0b0f19; font-family: 'Segoe UI', Tahoma, sans-serif; color: #fff; }
+        #canvas-container { width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1; }
+
+        .ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 10; display: flex; flex-direction: column; justify-content: center;
+            align-items: center; pointer-events: none;
+        }
+        .interactive { pointer-events: auto; }
+
+        #feedback-msg {
+            position: absolute; top: 30px; left: 50%; transform: translateX(-50%);
+            font-size: 2rem; font-weight: bold; text-shadow: 0 0 10px rgba(0,0,0,0.8);
+            transition: opacity 0.3s; opacity: 0; pointer-events: none; z-index: 5;
+        }
+
+        /* CAMARA EN LA ESQUINA */
+        #webcam-container {
+            position: absolute; bottom: 15px; right: 15px; z-index: 15;
+            width: 160px; height: 120px; border-radius: 12px; overflow: hidden;
+            border: 2px solid #38bdf8; background: #000; box-shadow: 0 0 15px rgba(0,0,0,0.6);
+        }
+        #webcam { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+
+        .card {
+            background: rgba(15, 23, 42, 0.95); border: 2px solid #38bdf8;
+            border-radius: 20px; padding: 35px; max-width: 520px; width: 90%;
+            text-align: center; box-shadow: 0 0 30px rgba(56, 189, 248, 0.4);
+        }
+        h1 { font-size: 2rem; color: #38bdf8; margin-bottom: 15px; }
+        p { font-size: 0.95rem; line-height: 1.5; color: #cbd5e1; margin-bottom: 15px; }
+
+        .stats-summary {
+            background: rgba(255, 255, 255, 0.05); border-radius: 10px;
+            padding: 20px; margin: 20px 0; display: flex; justify-content: space-around; font-size: 1.1rem;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #0284c7, #0369a1); color: white;
+            border: none; padding: 12px 30px; font-size: 1.1rem; font-weight: bold;
+            border-radius: 50px; cursor: pointer; transition: all 0.3s;
+        }
+        .btn:hover { transform: translateY(-2px); background: linear-gradient(135deg, #0369a1, #0284c7); }
+        .hidden { display: none !important; }
+        #vr-button-container { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 20; }
+    </style>
+
+    <!-- Importmap Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <!-- LIBRERÍAS DE MEDIAPIPE (DETECCIÓN DE MANO VÍA CÁMARA WEB) -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <!-- VISTA PREVIA DE CÁMARA WEB -->
+    <div id="webcam-container">
+        <video id="webcam" autoplay playsinline muted></video>
+    </div>
+
+    <!-- MENSAJE DE RETROALIMENTACIÓN -->
+    <div id="feedback-msg"></div>
+
+    <!-- MENÚ INICIAL -->
+    <div id="main-menu" class="ui-layer interactive">
+        <div class="card">
+            <h1>Air Draw 3D Challenge</h1>
+            <p>Dibuja la figura flotante en el aire imitando su forma para conseguir puntos y tiempo extra.</p>
+            <div style="text-align: left; background: rgba(255,255,255,0.05); padding: 12px; border-radius: 10px; font-size: 0.85rem; margin-bottom: 15px;">
+                📷 <strong>Cámara Web:</strong> Mueve tu mano frente a la cámara. Junta el <i>Índice</i> y <i>Pulgar</i> para trazar.<br>
+                🥽 <strong>VR:</strong> Junta los dedos Índice y Pulgar (Pinch) para trazar.<br>
+                🖱️ <strong>Mouse:</strong> Clic izquierdo y arrastrar.
+            </div>
+            <button id="start-btn" class="btn">¡ACTIVAR CÁMARA Y JUGAR!</button>
+        </div>
+    </div>
+
+    <!-- GAME OVER -->
+    <div id="game-over-menu" class="ui-layer interactive hidden">
+        <div class="card">
+            <h1 style="color: #ef4444;">¡TIEMPO AGOTADO!</h1>
+            <p>Resultados finales:</p>
+
+            <div class="stats-summary">
+                <div>PUNTOS: <br><strong id="final-score" style="font-size: 2rem; color: #38bdf8;">0</strong></div>
+                <div>FIGURAS: <br><strong id="final-shapes" style="font-size: 2rem; color: #10b981;">0</strong></div>
+            </div>
+
+            <button id="restart-btn" class="btn">JUGAR DE NUEVO</button>
+        </div>
+    </div>
+
+    <div id="vr-button-container"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+        import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+
+        /* ==========================================================================
+           CONFIGURACIÓN GLOBAL Y ESTADO
+           ========================================================================== */
+        let scene, camera, renderer, clock;
+        let isDrawing = false;
+        let currentLineMesh = null;
+        let drawnPoints = [];
+        let guidePoints = [];
+        let guideMesh = null;
+
+        let gameState = {
+            score: 0,
+            shapesCompleted: 0,
+            time: 30,
+            isPlaying: false,
+            timerInterval: null
+        };
+
+        let brushCursor, mouse;
+        let hand1, hand2;
+
+        const uiMainMenu = document.getElementById('main-menu');
+        const uiGameOverMenu = document.getElementById('game-over-menu');
+        const feedbackMsg = document.getElementById('feedback-msg');
+
+        /* ==========================================================================
+           FIGURAS GEOMÉTRICAS
+           ========================================================================== */
+        const SHAPES = {
+            CÍRCULO: (r = 0.35) => {
+                const pts = [];
+                for (let i = 0; i <= 32; i++) {
+                    const a = (i / 32) * Math.PI * 2;
+                    pts.push(new THREE.Vector3(Math.cos(a) * r, Math.sin(a) * r, 0));
+                }
+                return pts;
+            },
+            CUADRADO: (s = 0.35) => [
+                new THREE.Vector3(-s, s, 0), new THREE.Vector3(s, s, 0),
+                new THREE.Vector3(s, -s, 0), new THREE.Vector3(-s, -s, 0),
+                new THREE.Vector3(-s, s, 0)
+            ],
+            TRIÁNGULO: (s = 0.45) => [
+                new THREE.Vector3(0, s, 0), new THREE.Vector3(s, -s * 0.7, 0),
+                new THREE.Vector3(-s, -s * 0.7, 0), new THREE.Vector3(0, s, 0)
+            ],
+            ESTRELLA: (rOuter = 0.45, rInner = 0.2) => {
+                const pts = [];
+                for (let i = 0; i <= 10; i++) {
+                    const r = (i % 2 === 0) ? rOuter : rInner;
+                    const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+                    pts.push(new THREE.Vector3(Math.cos(a) * r, Math.sin(a) * r, 0));
+                }
+                return pts;
+            }
+        };
+
+        /* ==========================================================================
+           INICIALIZACIÓN THREE.JS
+           ========================================================================== */
+        function initEngine() {
+            const container = document.getElementById('canvas-container');
+            clock = new THREE.Clock();
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0b0f19);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 1.3, 1.8);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.xr.enabled = true;
+            container.appendChild(renderer.domElement);
+
+            document.getElementById('vr-button-container').appendChild(VRButton.createButton(renderer));
+
+            // Luces
+            scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+            const pointLight = new THREE.PointLight(0x38bdf8, 2, 10);
+            pointLight.position.set(0, 2, 2);
+            scene.add(pointLight);
+
+            // Cursor flotante del pincel
+            const cursorGeo = new THREE.SphereGeometry(0.02, 16, 16);
+            const cursorMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
+            brushCursor = new THREE.Mesh(cursorGeo, cursorMat);
+            scene.add(brushCursor);
+
+            mouse = new THREE.Vector2();
+
+            setupVRHands();
+            setupMediaPipeWebcam();
+
+            // Eventos del Mouse (Fallback)
+            window.addEventListener('pointerdown', onPointerDown);
+            window.addEventListener('pointermove', onPointerMove);
+            window.addEventListener('pointerup', onPointerUp);
+            window.addEventListener('resize', onWindowResize);
+
+            renderer.setAnimationLoop(render);
+        }
+
+        /* ==========================================================================
+           DETECCIÓN DE MANO POR CÁMARA (MEDIAPIPE AI)
+           ========================================================================== */
+        function setupMediaPipeWebcam() {
+            const videoElement = document.getElementById('webcam');
+
+            const hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.6,
+                minTrackingConfidence: 0.6
+            });
+
+            hands.onResults((results) => {
+                if (!gameState.isPlaying || renderer.xr.isPresenting) return;
+
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    const landmarks = results.multiHandLandmarks[0];
+
+                    // Puntos clave: Índice (8) y Pulgar (4)
+                    const indexTip = landmarks[8];
+                    const thumbTip = landmarks[4];
+
+                    // Convertir coordenadas 2D de cámara a coordenadas 3D del juego
+                    const x3d = (0.5 - indexTip.x) * 2.2; // Invertido para efecto espejo
+                    const y3d = (0.5 - indexTip.y) * 1.8 + 1.3;
+                    const targetPos = new THREE.Vector3(x3d, y3d, 0.5);
+
+                    brushCursor.position.lerp(targetPos, 0.4); // Movimiento suave
+
+                    // Medir distancia entre Índice y Pulgar (Gesto Pinch)
+                    const distPinch = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
+
+                    if (distPinch < 0.08) { // Pellizco detectado -> Pintar
+                        if (!isDrawing) startDrawing(brushCursor.position);
+                        else updateDrawing(brushCursor.position);
+                    } else {
+                        if (isDrawing) stopDrawing();
+                    }
+                } else {
+                    if (isDrawing) stopDrawing();
+                }
+            });
+
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({ image: videoElement });
+                },
+                width: 320,
+                height: 240
+            });
+            cameraUtils.start();
+        }
+
+        /* ==========================================================================
+           CARGA Y EVALUACIÓN DE FIGURAS
+           ========================================================================== */
+        function spawnRandomShape() {
+            if (guideMesh) scene.remove(guideMesh);
+
+            const keys = Object.keys(SHAPES);
+            const currentShapeName = keys[Math.floor(Math.random() * keys.length)];
+            guidePoints = SHAPES[currentShapeName]();
+
+            const path = new THREE.CatmullRomCurve3(guidePoints);
+            const geo = new THREE.TubeGeometry(path, 64, 0.01, 8, false);
+            const mat = new THREE.MeshStandardMaterial({
+                color: 0xfacc15,
+                emissive: 0xfacc15,
+                emissiveIntensity: 0.5,
+                transparent: true,
+                opacity: 0.6
+            });
+
+            guideMesh = new THREE.Mesh(geo, mat);
+            guideMesh.position.set(0, 1.3, 0.5);
+            scene.add(guideMesh);
+        }
+
+        function evaluateDrawing() {
+            if (drawnPoints.length < 10 || guidePoints.length === 0) return;
+
+            const center = new THREE.Vector3();
+            drawnPoints.forEach(p => center.add(p));
+            center.divideScalar(drawnPoints.length);
+
+            let totalMatchScore = 0;
+            const sampleCount = 20;
+
+            for (let i = 0; i < sampleCount; i++) {
+                const drawnIndex = Math.floor((i / sampleCount) * drawnPoints.length);
+                const ptDrawn = drawnPoints[drawnIndex].clone().sub(center);
+
+                let minDist = Infinity;
+                guidePoints.forEach(ptGuide => {
+                    const d = ptDrawn.distanceTo(ptGuide);
+                    if (d < minDist) minDist = d;
+                });
+
+                if (minDist < 0.16) totalMatchScore++;
+            }
+
+            const accuracy = totalMatchScore / sampleCount;
+
+            if (accuracy >= 0.45) { // Si acertó más del 45%
+                const bonusTime = Math.round(accuracy * 5);
+                gameState.score += Math.round(accuracy * 100);
+                gameState.shapesCompleted++;
+                gameState.time += bonusTime;
+                showFeedback(`¡EXCELENTE! +${bonusTime}s`, "#10b981");
+                spawnRandomShape();
+            } else {
+                showFeedback("¡CASI! Intenta de nuevo", "#f43f5e");
+            }
+        }
+
+        function showFeedback(text, color) {
+            feedbackMsg.innerText = text;
+            feedbackMsg.style.color = color;
+            feedbackMsg.style.opacity = "1";
+            setTimeout(() => { feedbackMsg.style.opacity = "0"; }, 1200);
+        }
+
+        /* ==========================================================================
+           TRAZADO Y DIBUJO 3D
+           ========================================================================== */
+        function startDrawing(point) {
+            if (!gameState.isPlaying) return;
+            isDrawing = true;
+            drawnPoints = [point.clone()];
+
+            const path = new THREE.CatmullRomCurve3([point.clone(), point.clone().addScalar(0.001)]);
+            const geo = new THREE.TubeGeometry(path, 2, 0.012, 8, false);
+            const mat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x38bdf8, emissiveIntensity: 0.4 });
+
+            currentLineMesh = new THREE.Mesh(geo, mat);
+            scene.add(currentLineMesh);
+        }
+
+        function updateDrawing(point) {
+            if (!isDrawing || !currentLineMesh) return;
+
+            const lastPoint = drawnPoints[drawnPoints.length - 1];
+            if (lastPoint.distanceTo(point) < 0.012) return;
+
+            drawnPoints.push(point.clone());
+
+            const path = new THREE.CatmullRomCurve3(drawnPoints);
+            currentLineMesh.geometry.dispose();
+            currentLineMesh.geometry = new THREE.TubeGeometry(path, drawnPoints.length * 2, 0.012, 8, false);
+        }
+
+        function stopDrawing() {
+            if (!isDrawing) return;
+            isDrawing = false;
+
+            evaluateDrawing();
+
+            if (currentLineMesh) {
+                scene.remove(currentLineMesh);
+                currentLineMesh.geometry.dispose();
+                currentLineMesh.material.dispose();
+                currentLineMesh = null;
+            }
+            drawnPoints = [];
+        }
+
+        /* ==========================================================================
+           HAND TRACKING EN VR Y MOUSE (FALLBACKS)
+           ========================================================================== */
+        function setupVRHands() {
+            const handModelFactory = new XRHandModelFactory();
+            hand1 = renderer.xr.getHand(0); hand1.add(handModelFactory.createHandModel(hand1, "mesh")); scene.add(hand1);
+            hand2 = renderer.xr.getHand(1); hand2.add(handModelFactory.createHandModel(hand2, "mesh")); scene.add(hand2);
+        }
+
+        function processVRHands(hand) {
+            if (!hand || !hand.joints) return;
+            const indexTip = hand.joints['index-finger-tip'];
+            const thumbTip = hand.joints['thumb-tip'];
+
+            if (indexTip && thumbTip) {
+                const indexPos = new THREE.Vector3();
+                const thumbPos = new THREE.Vector3();
+                indexTip.getWorldPosition(indexPos);
+                thumbTip.getWorldPosition(thumbPos);
+
+                brushCursor.position.copy(indexPos);
+
+                if (indexPos.distanceTo(thumbPos) < 0.03) {
+                    if (!isDrawing) startDrawing(indexPos);
+                    else updateDrawing(indexPos);
+                } else {
+                    if (isDrawing) stopDrawing();
+                }
+            }
+        }
+
+        function getMouse3DPosition(e) {
+            mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+            const vector = new THREE.Vector3(mouse.x, mouse.y, 0.5).unproject(camera);
+            const dir = vector.sub(camera.position).normalize();
+            return camera.position.clone().add(dir.multiplyScalar(1.3));
+        }
+
+        function onPointerDown(e) {
+            if (e.target.closest('.ui-layer')) return;
+            const pos = getMouse3DPosition(e);
+            brushCursor.position.copy(pos);
+            startDrawing(pos);
+        }
+
+        function onPointerMove(e) {
+            const pos = getMouse3DPosition(e);
+            brushCursor.position.copy(pos);
+            if (isDrawing) updateDrawing(pos);
+        }
+
+        function onPointerUp() { stopDrawing(); }
+
+        /* ==========================================================================
+           FLUJO DEL JUEGO
+           ========================================================================== */
+        function startGame() {
+            gameState.score = 0;
+            gameState.shapesCompleted = 0;
+            gameState.time = 30;
+            gameState.isPlaying = true;
+
+            uiMainMenu.classList.add('hidden');
+            uiGameOverMenu.classList.add('hidden');
+
+            spawnRandomShape();
+
+            clearInterval(gameState.timerInterval);
+            gameState.timerInterval = setInterval(() => {
+                if (!gameState.isPlaying) return;
+                gameState.time--;
+                if (gameState.time <= 0) endGame();
+            }, 1000);
+        }
+
+        function endGame() {
+            gameState.isPlaying = false;
+            clearInterval(gameState.timerInterval);
+
+            if (guideMesh) scene.remove(guideMesh);
+
+            uiGameOverMenu.classList.remove('hidden');
+
+            document.getElementById('final-score').innerText = gameState.score;
+            document.getElementById('final-shapes').innerText = gameState.shapesCompleted;
+        }
+
+        function render() {
+            if (renderer.xr.isPresenting) {
+                processVRHands(hand1);
+                processVRHands(hand2);
+            }
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        document.getElementById('start-btn').addEventListener('click', () => { initEngine(); startGame(); });
+        document.getElementById('restart-btn').addEventListener('click', () => startGame());
+    </script>
+</body>
+</html>
